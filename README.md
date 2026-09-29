@@ -188,6 +188,17 @@ curl -X POST -H "Authorization: Bearer $CRON_SECRET" https://<your-app>/api/scra
 ```
 Free backend tiers often sleep when idle, so the first scrape after a pause can be slow.
 
+### Branches
+| Branch | Role |
+|---|---|
+| `main` | Default branch. **Production**: point production hosts at this branch |
+| `feature` | All changes land here first. Promote to `main` once CI passes |
+
+```bash
+git checkout feature   # work, commit, git push
+git checkout main && git merge --ff-only feature && git push && git checkout feature
+```
+
 ## Known limitations
 - Scrapers depend on each site's page structure and may need updating when those sites change.
 - The experience level and remote status are guesses made from keywords.
