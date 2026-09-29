@@ -6,26 +6,30 @@ services:
     volumes:
       - mongo_data:/data/db
 
-  backend:
-    build: ./backend
-    env_file:
-      - ./backend/.env
+  scraper:
+    build: ./scraper
     environment:
-      MONGO_URI: mongodb://mongo:27017
+      SERVICE_TOKEN: ${SERVICE_TOKEN:-change-me}
+      SERPAPI_KEY: ${SERPAPI_KEY:-}
     ports:
       - "8000:8000"
-    depends_on:
-      - mongo
 
-  frontend:
-    build:
-      context: ./frontend
-      args:
-        NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://localhost:8000}
+  web:
+    build: ./web
+    environment:
+      MONGODB_URI: mongodb://mongo:27017
+      MONGODB_DB: job_hunter
+      SCRAPER_URL: http://scraper:8000
+      SCRAPER_TOKEN: ${SERVICE_TOKEN:-change-me}
+      SCRAPE_INTERVAL_HOURS: ${SCRAPE_INTERVAL_HOURS:-6}
+      APP_USERNAME: ${APP_USERNAME:-me}
+      APP_PASSWORD: ${APP_PASSWORD:-}
+      CRON_SECRET: ${CRON_SECRET:-}
     ports:
       - "3000:3000"
     depends_on:
-      - backend
+      - mongo
+      - scraper
 
 volumes:
   mongo_data:

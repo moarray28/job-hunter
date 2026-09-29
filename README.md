@@ -11,20 +11,28 @@ like, rank them against your skills, and track every application you send.
 ## How it works
 
 ```
- ┌──────────────┐     REST/JSON      ┌───────────────────────────┐        ┌──────────┐
- │  Next.js UI  │ ─────────────────▶ │  FastAPI backend          │ ─────▶ │ MongoDB  │
- │  :3000       │                    │  :8000                    │        │ :27017   │
- └──────────────┘                    │  ├─ adapters/  (sources)  │        └──────────┘
-                                     │  ├─ filters.py (filters)  │
-                                     │  ├─ scheduler (every 6h)  │
-                                     │  └─ classifier / matcher  │
-                                     └───────────────────────────┘
+ ┌───────────────────────────────┐   X-Service-Token   ┌──────────────────────┐
+ │  web/  (Next.js, :3000)       │ ──────────────────▶ │ scraper/ (FastAPI)   │
+ │  ├─ pages (UI)                │                     │ :8000                │
+ │  ├─ app/api/*  (REST API)     │                     │ ├─ adapters/ sources │
+ │  ├─ lib/server/filters.ts     │                     │ └─ enricher (JD      │
+ │  ├─ scheduler (every 6h)      │                     │    detail fetch)     │
+ │  └─ classifier / matcher      │                     └──────────────────────┘
+ └──────────────┬────────────────┘
+                ▼
+          ┌──────────┐
+          │ MongoDB  │
+          └──────────┘
 ```
+
+- **web/** is the whole app: UI, REST API, MongoDB access, filters, scoring and the scheduler.
+- **scraper/** is a small stateless Python service that fetches listings and job descriptions.
+  It has no database and is only called by `web`.
 
 1. **Attach a portal.** A portal is one configured source: an adapter type plus its settings
    (search query, location, careers URL, industry tag).
 2. **Scrape.** Enabled portals run every 6 hours, or on demand with **Run now** or **Scrape all**.
-   For each new job the backend:
+   For each new job the app:
    - skips URLs it has already seen (deduplication);
    - fetches the job's detail page to get the description, when the listing didn't include one;
    - guesses the **experience level**, the **minimum years required**, and whether the job is **remote**;
@@ -70,48 +78,59 @@ filters and sort order are saved in the browser.
 
 ## Configuration
 
-### Backend: `backend/.env` (copy it from `backend/.env.example`)
+### Web: `web/.env.local` (copy it from `web/.env.example`)
 | Variable | Default | Purpose |
 |---|---|---|
-| `MONGO_URI` | `mongodb://localhost:27017` | MongoDB connection string. For MongoDB Atlas, use its `mongodb+srv://...` URI |
-| `MONGO_DB` | `job_hunter` | Database name |
-| `SERPAPI_KEY` | *(empty)* | Needed only for the `google_jobs` adapter |
-| `CORS_ORIGINS` | `["http://localhost:3000"]` | The frontend URLs allowed to call the API. This must be a JSON list |
+| `MONGODB_URI` | `mongodb://localhost:27017` | MongoDB connection string. For MongoDB Atlas, use its `mongodb+srv://...` URI |
+| `MONGODB_DB` | `job_hunter` | Database name |
+| `SCRAPER_URL` | `http://localhost:8000` | URL of the scraper service |
+| `SCRAPER_TOKEN` | *(empty)* | Shared secret sent to the scraper. Must equal the scraper's `SERVICE_TOKEN` |
+| `SCRAPE_INTERVAL_HOURS` | `6` | Built-in schedule. Set `0` on serverless hosts and use an external cron instead |
+| `APP_USERNAME` | `me` | Login username |
+| `APP_PASSWORD` | *(empty)* | When set, every page and API route requires HTTP Basic auth. **Always set this when deployed** |
+| `CRON_SECRET` | *(empty)* | Lets an external cron call `POST /api/scrape/run-all` with `Authorization: Bearer <CRON_SECRET>` |
 
-### Frontend: `frontend/.env.local` (copy it from `frontend/.env.example`)
+### Scraper: `scraper/.env` (copy it from `scraper/.env.example`)
 | Variable | Default | Purpose |
 |---|---|---|
-| `NEXT_PUBLIC_API_URL` | `http://localhost:8000` | Backend URL. It's baked in at build time |
+| `SERVICE_TOKEN` | *(empty)* | Required `X-Service-Token` header. Empty disables the check (local dev only) |
+| `SERPAPI_KEY` | *(empty)* | Needed only for the `google_jobs` adapter |
 
 ## Running locally
 
 ### Option A: Docker (easiest)
 Requires [Docker Desktop](https://www.docker.com/products/docker-desktop/).
 ```bash
-cp backend/.env.example backend/.env
+cp .env.example .env        # set SERVICE_TOKEN, and optionally APP_PASSWORD / SERPAPI_KEY
 docker compose up --build
 ```
 - UI: http://localhost:3000
-- API docs (Swagger): http://localhost:8000/docs
+- Scraper API docs (Swagger): http://localhost:8000/docs
 
 ### Option B: without Docker
-Requires Python 3.11+, Node 18+, and MongoDB, either a
+Requires Python 3.11+, Node 20+, and MongoDB, either a
 [local install](https://www.mongodb.com/try/download/community) or a free
 [Atlas](https://www.mongodb.com/atlas) cluster.
 ```bash
-# Terminal 1: backend
-cd backend
+# Terminal 1: scraper
+cd scraper
 cp .env.example .env
 python -m venv .venv
 source .venv/Scripts/activate        # Windows Git Bash (macOS/Linux: source .venv/bin/activate)
 pip install -r requirements.txt
 uvicorn app.main:app --reload
 
-# Terminal 2: frontend
-cd frontend
+# Terminal 2: web
+cd web
 cp .env.example .env.local
 npm install
 npm run dev
+```
+
+### Tests
+```bash
+cd web && npm test                                              # filters, classifier, matcher
+cd scraper && pip install -r requirements-dev.txt && pytest     # adapter parsers
 ```
 
 ### First use
@@ -121,52 +140,55 @@ npm run dev
 
 ## Extending
 
-**Add a filter.** Append one entry to `FILTERS` in `backend/app/filters.py`:
-```python
-FilterDef("salary", "Salary mentions", "text", any_term_in("salary")),
+**Add a filter.** Append one entry to `FILTERS` in `web/lib/server/filters.ts`:
+```ts
+{ key: "salary", label: "Salary mentions", kind: "text", build: anyTermIn("description") },
 ```
 The API accepts it right away and the UI shows it under **+ Add filter**. Available builders:
-`any_term_in`, `all_terms_in`, `no_term_in`, `one_of`, `is_true`, or your own function that
+`anyTermIn`, `allTermsIn`, `noTermIn`, `oneOf`, `isTrue`, or your own function that
 returns a MongoDB query.
 
-**Add a source.** Create `backend/app/adapters/<name>.py` with a class that subclasses
-`BaseAdapter`. Set `key` and `display_name`, implement `async search(config) -> list[JobPosting]`,
-and register it in `backend/app/adapters/registry.py`. It then appears in the Portals dropdown.
+**Add a source.** Create `scraper/app/adapters/<name>.py` with a class that subclasses
+`BaseAdapter`. Set `key` and `display_name`, implement `async search(req) -> list[JobPosting]`,
+and register it in `scraper/app/adapters/registry.py`. It then appears in the Portals dropdown.
 
 ## Project structure
 ```
-backend/
-  app/
-    adapters/     one file per job source + registry
-    models/       Pydantic models (job, portal, application, profile)
-    routers/      REST endpoints
-    services/     scraping pipeline, classifier, matcher, description fetcher, scheduler
-    filters.py    add-on filter definitions
-    main.py       FastAPI app entrypoint
-frontend/
-  app/            Next.js pages (jobs, portals, applications, profile)
-  components/     Nav, FilterBar
-  lib/api.ts      typed API client
-docker-compose.yml
+web/                     Next.js app (UI + API + database)
+  app/                   pages: jobs, portals, applications, profile
+  app/api/               REST endpoints
+  components/            Nav, FilterBar
+  lib/api.ts             typed client used by the pages
+  lib/server/            db, filters, classifier, matcher, pipeline, scheduler, scraper client
+  middleware.ts          Basic-auth login + cron secret
+  instrumentation.ts     starts the scheduler
+scraper/                 FastAPI scraping service
+  app/adapters/          one file per job source + registry
+  app/enricher.py        job description fetcher
+  app/main.py            /adapters, /scrape, /enrich, /health
+  tests/
+docker-compose.yml       mongo + scraper + web
 ```
 
 ## Deployment
 
-GitHub stores the code. **GitHub Pages can't run this app**, because Pages only serves
-static files and the app needs a Python server and a database. To run it online:
+**GitHub Pages can't run this app**, because Pages only serves static files and the app needs
+a Node server, a Python service and a database. Push the code to GitHub, then connect these hosts to the repo:
 
-| Part | Suggested free host |
-|---|---|
-| Database | MongoDB Atlas (M0 free tier) |
-| Backend | Render, Railway or Fly.io, using `backend/Dockerfile` |
-| Frontend | Vercel (set `NEXT_PUBLIC_API_URL` to the backend's URL) |
+| Part | Suggested free host | Settings |
+|---|---|---|
+| Database | MongoDB Atlas (M0 free tier) | Allow network access from your hosts, copy the `mongodb+srv://` URI |
+| Scraper | Render, Railway or Fly.io | Root directory `scraper/`, uses `scraper/Dockerfile` (honours `$PORT`). Set `SERVICE_TOKEN`, `SERPAPI_KEY` |
+| Web | Vercel (root directory `web/`), or any Docker host using `web/Dockerfile` | Set the variables from `web/.env.example`, including `APP_PASSWORD` |
 
-⚠️ **Add authentication before deploying publicly.** The app has no login, so anyone with
-the URL could read and change your data. Also note that free backend tiers often sleep when
-idle, which pauses the 6-hour scrape schedule.
+On **Vercel** (serverless), the in-process scheduler doesn't run. Set `SCRAPE_INTERVAL_HOURS=0`,
+set `CRON_SECRET`, and have a cron service (e.g. cron-job.org or a GitHub Actions schedule) call:
+```bash
+curl -X POST -H "Authorization: Bearer $CRON_SECRET" https://<your-app>/api/scrape/run-all
+```
+Free backend tiers often sleep when idle, so the first scrape after a pause can be slow.
 
 ## Known limitations
 - Scrapers depend on each site's page structure and may need updating when those sites change.
 - The experience level and remote status are guesses made from keywords.
 - Industry comes from the portal's tag, not from the individual job.
-- There are no automated tests yet.
